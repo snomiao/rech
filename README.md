@@ -2,6 +2,8 @@
 
 CLI proxy for running [Playwright](https://playwright.dev/) commands on a shared remote browser. Run a server on a machine with a browser, then send commands from any client.
 
+Built on top of [playwright-multi-tab](https://github.com/snomiao/playwright-multi-tab) — a patched Playwright fork with multi-tab and multi-session browser automation.
+
 ## Features
 
 - **Session isolation** — clients are automatically namespaced by git repo or hostname
@@ -13,7 +15,7 @@ CLI proxy for running [Playwright](https://playwright.dev/) commands on a shared
 ## Prerequisites
 
 - [Bun](https://bun.sh/) ≥ 1.0
-- [playwright-cli](https://www.npmjs.com/package/playwright-cli) (or set `PLAYWRIGHT_CLI` to your binary)
+- [playwright-multi-tab](https://github.com/snomiao/playwright-multi-tab) (provides `playwright-cli-multi-tab`, or set `PLAYWRIGHT_CLI` to your binary)
 
 ## Install
 
@@ -96,6 +98,10 @@ Clients can also pass `-s=name` to create named sub-sessions within their namesp
 bun install
 bun test
 ```
+
+## Related
+
+- [playwright-multi-tab](https://github.com/snomiao/playwright-multi-tab) — the underlying Playwright fork powering rech's multi-tab and multi-session browser control
 
 ## License
 
