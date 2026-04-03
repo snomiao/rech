@@ -79,7 +79,7 @@ export async function serve() {
       });
       const namespacedSession = clientSession ? `${sessionId}-${clientSession}` : sessionId;
 
-      const bin = process.env.PLAYWRIGHT_CLI || "playwright-cli-multi-tab";
+      const bin = process.env.PLAYWRIGHT_CLI || "playwright-cli";
 
       if (filteredArgs.length === 0) {
         filteredArgs.push("--help");
