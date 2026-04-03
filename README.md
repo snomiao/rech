@@ -82,6 +82,8 @@ cp .env.example .env.local
 | `GEMINI_API_KEY` | Gemini API key for screenshot vision descriptions | — |
 | `PLAYWRIGHT_CLI` | Path to playwright-cli binary (recommended: `playwright-cli-multi-tab` for full multi-tab support) | `playwright-cli` |
 | `RECH_HOST` | Server bind address | `127.0.0.1` |
+| `PLAYWRIGHT_MCP_EXTENSION_ID` | Chrome extension ID (client overrides server) | — |
+| `PLAYWRIGHT_MCP_EXTENSION_TOKEN` | Chrome extension token (client overrides server) | — |
 
 ### Remote access
 

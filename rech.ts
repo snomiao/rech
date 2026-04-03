@@ -70,6 +70,11 @@ export async function describeImage(imagePath: string): Promise<string | null> {
   }
 }
 
+export const PASSTHROUGH_ENV_KEYS = [
+  "PLAYWRIGHT_MCP_EXTENSION_ID",
+  "PLAYWRIGHT_MCP_EXTENSION_TOKEN",
+] as const;
+
 export function log(msg: string) {
   mkdirSync(LOG_DIR, { recursive: true });
   const ts = new Date().toISOString();
@@ -143,6 +148,14 @@ async function getClientIdentity(): Promise<{ gitUrl?: string; hostname?: string
   return { hostname: hostname(), cwd };
 }
 
+function getClientEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of PASSTHROUGH_ENV_KEYS) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  return env;
+}
+
 async function run(url: string, args: string[]) {
   const { key, host, port } = parseUrl(url);
   const identity = await getClientIdentity();
@@ -152,7 +165,7 @@ async function run(url: string, args: string[]) {
   const res = await fetch(`http://${host}:${port}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ args, identity }),
+    body: JSON.stringify({ args, identity, env: getClientEnv() }),
     signal: AbortSignal.timeout(70_000),
   }).catch((e) => {
     console.error(`[rech] ${e.message}`);

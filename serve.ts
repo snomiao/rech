@@ -2,7 +2,7 @@ import { file } from "bun";
 import { createHash } from "crypto";
 import { mkdirSync } from "fs";
 import { join, resolve, relative, isAbsolute } from "path";
-import { log, parseUrl, getOrCreateUrl, authCheck, describeImage, RECH_DIR } from "./rech.ts";
+import { log, parseUrl, getOrCreateUrl, authCheck, describeImage, RECH_DIR, PASSTHROUGH_ENV_KEYS } from "./rech.ts";
 
 export function isUnderDir(base: string, candidate: string): boolean {
   const absBase = resolve(base) + "/";
@@ -44,6 +44,7 @@ export async function serve() {
       let args: string[];
       let sessionId: string;
       let clientName = "";
+      let clientEnv: Record<string, string> = {};
       if (Array.isArray(body)) {
         args = body;
         const clientAddr = `${req.headers.get("x-forwarded-for") || server.requestIP(req)?.address || "unknown"}`;
@@ -65,6 +66,12 @@ export async function serve() {
           sessionId = createHash("sha256").update(clientAddr).digest("hex").slice(0, 12);
           clientName = clientAddr;
           log(`session from client IP fallback: ${clientAddr} -> ${sessionId}`);
+        }
+        // Extract allowlisted env vars from client (client overrides server)
+        if (body.env && typeof body.env === "object") {
+          for (const key of PASSTHROUGH_ENV_KEYS) {
+            if (typeof body.env[key] === "string") clientEnv[key] = body.env[key];
+          }
         }
       }
 
@@ -117,6 +124,13 @@ export async function serve() {
         }
       }
 
+      // Merge passthrough env: server .env.local defaults, then client overrides
+      const passthroughEnv: Record<string, string | undefined> = {};
+      for (const key of PASSTHROUGH_ENV_KEYS) {
+        if (process.env[key]) passthroughEnv[key] = process.env[key];
+      }
+      Object.assign(passthroughEnv, clientEnv);
+
       const childEnv: Record<string, string | undefined> = {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
@@ -124,6 +138,7 @@ export async function serve() {
         DISPLAY: process.env.DISPLAY,
         XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
         ...(clientName ? { PLAYWRIGHT_MCP_CLIENT_NAME: clientName } : {}),
+        ...passthroughEnv,
       };
       const proc = Bun.spawn([bin, ...filteredArgs, "--extension", `-s=${namespacedSession}`], {
         cwd: workDir,
