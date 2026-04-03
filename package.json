@@ -6,7 +6,8 @@
     "rech": "./rech.ts"
   },
   "scripts": {
-    "serve": "bun run rech.ts serve"
+    "serve": "bun run rech.ts serve",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest"

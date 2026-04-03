@@ -4,7 +4,7 @@ import { mkdirSync } from "fs";
 import { join, resolve, relative, isAbsolute } from "path";
 import { log, parseUrl, getOrCreateUrl, authCheck, describeImage, RECH_DIR } from "./rech.ts";
 
-function isUnderDir(base: string, candidate: string): boolean {
+export function isUnderDir(base: string, candidate: string): boolean {
   const absBase = resolve(base) + "/";
   const absCandidate = resolve(base, candidate);
   return absCandidate.startsWith(absBase);
