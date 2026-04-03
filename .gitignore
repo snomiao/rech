@@ -3,3 +3,5 @@ node_modules/
 .env.local
 .playwright-cli-multi-tab/
 bun.lock
+rech.js
+serve.js
