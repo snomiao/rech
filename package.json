@@ -1,0 +1,14 @@
+{
+  "name": "rech",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "rech": "./rech.ts"
+  },
+  "scripts": {
+    "serve": "bun run rech.ts serve"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

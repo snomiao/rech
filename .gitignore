@@ -1,0 +1,5 @@
+node_modules/
+.rech/
+.env.local
+.playwright-cli-multi-tab/
+bun.lock
