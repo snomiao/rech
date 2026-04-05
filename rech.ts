@@ -35,40 +35,6 @@ if (existsSync(envFile)) {
   });
 }
 
-/** Describe an image using Gemini vision API. Returns description or null on failure. */
-export async function describeImage(imagePath: string): Promise<string | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
-  try {
-    const imageData = await file(imagePath).arrayBuffer();
-    const base64 = Buffer.from(imageData).toString("base64");
-    const mimeType = imagePath.endsWith(".png") ? "image/png" : "image/jpeg";
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: "Describe this browser screenshot concisely in 2-3 sentences. Focus on what's visible: page layout, content, any errors or issues.",
-                },
-                { inline_data: { mime_type: mimeType, data: base64 } },
-              ],
-            },
-          ],
-        }),
-      },
-    );
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
-  } catch {
-    return null;
-  }
-}
 
 export const PASSTHROUGH_ENV_KEYS = [
   "PLAYWRIGHT_MCP_EXTENSION_ID",
@@ -164,10 +130,6 @@ function getClientEnv(): Record<string, string> {
 async function run(url: string, args: string[]) {
   const { key, host, port } = parseUrl(url);
 
-  // Extract --gemini-vision flag (not forwarded to server args)
-  const geminiVision = args.includes("--gemini-vision");
-  const filteredArgs = args.filter((a) => a !== "--gemini-vision");
-
   const identity = await getClientIdentity();
   console.error(
     `[rech] connecting to ${host}:${port} (identity: ${identity.gitUrl || `${identity.hostname}:${identity.cwd}`})`,
@@ -175,7 +137,7 @@ async function run(url: string, args: string[]) {
   const res = await fetch(`http://${host}:${port}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ args: filteredArgs, identity, env: getClientEnv(), geminiVision }),
+    body: JSON.stringify({ args, identity, env: getClientEnv() }),
     signal: AbortSignal.timeout(70_000),
   }).catch((e) => {
     console.error(`[rech] ${e.message}`);
@@ -187,12 +149,11 @@ async function run(url: string, args: string[]) {
     process.exit(1);
   }
 
-  const { status, stdout, stderr, files, descriptions, existingSession } = (await res.json()) as {
+  const { status, stdout, stderr, files, existingSession } = (await res.json()) as {
     status: number;
     stdout: string;
     stderr: string;
     files?: string[];
-    descriptions?: Record<string, string>;
     existingSession?: boolean;
   };
 
@@ -217,9 +178,6 @@ async function run(url: string, args: string[]) {
       const dest = join(dlDir, basename(name));
       await Bun.write(dest, fileRes);
       console.error(`[rech] downloaded: ${dest}`);
-      if (descriptions?.[name]) {
-        console.error(`[rech] vision: ${descriptions[name]}`);
-      }
     }
   }
 

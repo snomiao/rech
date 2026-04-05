@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { parseUrl, authCheck, describeImage, DEFAULT_PORT, ENV_KEY } from "./rech.ts";
+import { parseUrl, authCheck, DEFAULT_PORT, ENV_KEY } from "./rech.ts";
 
 describe("parseUrl", () => {
   test("parses key, host, and port from a remote-chrome URL", () => {
@@ -54,16 +54,6 @@ describe("authCheck", () => {
     const res = authCheck(req, "secret123");
     expect(res).not.toBeNull();
     expect(res!.status).toBe(401);
-  });
-});
-
-describe("describeImage", () => {
-  test("returns null when GEMINI_API_KEY is not set", async () => {
-    const original = process.env.GEMINI_API_KEY;
-    delete process.env.GEMINI_API_KEY;
-    const result = await describeImage("/nonexistent/image.png");
-    expect(result).toBeNull();
-    if (original) process.env.GEMINI_API_KEY = original;
   });
 });
 
