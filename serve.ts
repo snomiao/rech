@@ -93,7 +93,7 @@ export async function serve() {
       });
       const namespacedSession = clientSession ? `${sessionId}-${clientSession}` : sessionId;
 
-      const bin = process.env.PLAYWRIGHT_CLI || "playwright-cli";
+      const [bin, ...binArgs] = (process.env.PLAYWRIGHT_CLI || "playwright-cli").split(" ");
 
       if (filteredArgs.length === 0) {
         filteredArgs.push("--help");
@@ -105,7 +105,7 @@ export async function serve() {
       const isOpenCmd = filteredArgs[0] === "open";
       if (isOpenCmd) {
         try {
-          const listProc = Bun.spawn([bin, "tab-list", "--extension", `-s=${namespacedSession}`], {
+          const listProc = Bun.spawn([bin, ...binArgs, "tab-list", "--extension", `-s=${namespacedSession}`], {
             cwd: workDir,
             stdin: "ignore",
             stdout: "pipe",
@@ -147,7 +147,7 @@ export async function serve() {
         ...(clientName ? { PLAYWRIGHT_MCP_CLIENT_NAME: clientName } : {}),
         ...passthroughEnv,
       };
-      const proc = Bun.spawn([bin, ...filteredArgs, "--extension", `-s=${namespacedSession}`], {
+      const proc = Bun.spawn([bin, ...binArgs, ...filteredArgs, "--extension", `-s=${namespacedSession}`], {
         cwd: workDir,
         stdin: "ignore",
         stdout: "pipe",

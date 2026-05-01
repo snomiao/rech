@@ -39,6 +39,8 @@ if (existsSync(envFile)) {
 export const PASSTHROUGH_ENV_KEYS = [
   "PLAYWRIGHT_MCP_EXTENSION_ID",
   "PLAYWRIGHT_MCP_EXTENSION_TOKEN",
+  "PLAYWRIGHT_MCP_USER_DATA_DIR",
+  "PLAYWRIGHT_MCP_PROFILE_DIRECTORY",
 ] as const;
 
 export function log(msg: string) {
