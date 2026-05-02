@@ -4,3 +4,6 @@
 [submodule "lib/playwright"]
 	path = lib/playwright
 	url = https://github.com/snomiao/playwright.git
+[submodule "lib/playwright-multi-tab"]
+	path = lib/playwright-multi-tab
+	url = https://github.com/snomiao/playwright-multi-tab
