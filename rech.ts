@@ -6,27 +6,42 @@ import { mkdirSync, appendFileSync, existsSync } from "fs";
 import { hostname } from "os";
 import { join, basename } from "path";
 
-export const ENV_KEY = "REMOTE_CHROME_URL";
+export const ENV_KEY = "RECHROME_URL";
 export const DEFAULT_PORT = 13775;
 export const RECH_DIR = join(import.meta.dir, ".rech");
 export const LOG_DIR = join(RECH_DIR, "logs");
 
-// Load .env.local from script's directory (works even when invoked from elsewhere)
 const envFile = join(import.meta.dir, ".env.local");
 
-/** Load .env.local into process.env. */
-async function loadEnv() {
-  const envRaw = await file(envFile)
-    .text()
-    .catch(() => "");
+async function loadEnvFile(path: string): Promise<boolean> {
+  const envRaw = await file(path).text().catch(() => "");
+  if (!envRaw) return false;
+  let hasKey = false;
   for (const line of envRaw.split("\n")) {
     const m = line.match(/^\s*([^#=]+?)\s*=\s*(.*?)\s*$/);
-    if (m) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    if (m) {
+      process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+      if (m[1] === ENV_KEY) hasKey = true;
+    }
+  }
+  return hasKey;
+}
+
+async function loadEnv() {
+  await loadEnvFile(envFile);
+  // Walk up from cwd if still not found
+  if (!process.env[ENV_KEY]) {
+    let dir = process.cwd();
+    while (true) {
+      if (await loadEnvFile(join(dir, ".env.local"))) break;
+      const parent = join(dir, "..");
+      if (parent === dir) break;
+      dir = parent;
+    }
   }
 }
 await loadEnv();
 
-// Watch .env.local for changes and hot-reload
 import { watch } from "node:fs";
 if (existsSync(envFile)) {
   watch(envFile, async () => {
@@ -54,13 +69,24 @@ export function log(msg: string) {
 
 export function parseUrl(raw: string) {
   const u = new URL(raw);
-  return { key: u.username, host: u.hostname, port: parseInt(u.port) || DEFAULT_PORT };
+  const scheme = u.protocol.replace(":", "");
+  const protocol = scheme === "https" ? "https" : "http";
+  const defaultPort = scheme === "https" ? 443 : scheme === "http" ? 80 : DEFAULT_PORT;
+  return {
+    key: u.username,
+    host: u.hostname,
+    port: parseInt(u.port) || defaultPort,
+    protocol,
+    extensionId: u.searchParams.get("extension_id") ?? undefined,
+    extensionToken: u.searchParams.get("token") ?? undefined,
+    profileDirectory: u.searchParams.get("profile") ?? undefined,
+  };
 }
 
 export async function getOrCreateUrl(): Promise<string> {
   if (process.env[ENV_KEY]) return process.env[ENV_KEY];
   const key = randomBytes(9).toString("base64url"); // 12 chars
-  const url = `remote-chrome://${key}@${hostname()}:${DEFAULT_PORT}`;
+  const url = `http://${key}@${hostname()}:${DEFAULT_PORT}`;
   const newLine = `${ENV_KEY}=${url}`;
   const envRaw = await file(envFile)
     .text()
@@ -121,25 +147,31 @@ async function getClientIdentity(): Promise<{ gitUrl?: string; hostname?: string
   return { hostname: hostname(), cwd };
 }
 
-function getClientEnv(): Record<string, string> {
+function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?: string; profileDirectory?: string }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of PASSTHROUGH_ENV_KEYS) {
     if (process.env[key]) env[key] = process.env[key];
   }
+  if (urlExtras?.extensionId && !env["PLAYWRIGHT_MCP_EXTENSION_ID"])
+    env["PLAYWRIGHT_MCP_EXTENSION_ID"] = urlExtras.extensionId;
+  if (urlExtras?.extensionToken && !env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"])
+    env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = urlExtras.extensionToken;
+  if (urlExtras?.profileDirectory && !env["PLAYWRIGHT_MCP_PROFILE_DIRECTORY"])
+    env["PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] = urlExtras.profileDirectory;
   return env;
 }
 
 async function run(url: string, args: string[]) {
-  const { key, host, port } = parseUrl(url);
+  const { key, host, port, protocol, extensionId, extensionToken, profileDirectory } = parseUrl(url);
 
   const identity = await getClientIdentity();
   console.error(
     `[rech] connecting to ${host}:${port} (identity: ${identity.gitUrl || `${identity.hostname}:${identity.cwd}`})`,
   );
-  const res = await fetch(`http://${host}:${port}/run`, {
+  const res = await fetch(`${protocol}://${host}:${port}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ args, identity, env: getClientEnv() }),
+    body: JSON.stringify({ args, identity, env: getClientEnv({ extensionId, extensionToken, profileDirectory }) }),
     signal: AbortSignal.timeout(70_000),
   }).catch((e) => {
     console.error(`[rech] ${e.message}`);
@@ -173,7 +205,7 @@ async function run(url: string, args: string[]) {
     const gitignorePath = join(dlDir, ".gitignore");
     if (!existsSync(gitignorePath)) await Bun.write(gitignorePath, "*\n");
     for (const name of files) {
-      const fileRes = await fetch(`http://${host}:${port}/files/${name}`, {
+      const fileRes = await fetch(`${protocol}://${host}:${port}/files/${name}`, {
         headers: { Authorization: `Bearer ${key}` },
       });
       if (!fileRes.ok) continue;
@@ -196,7 +228,7 @@ if (import.meta.main) {
     const url = process.env[ENV_KEY];
     if (!url) {
       console.error(
-        `Usage:\n  rech serve\n  ${ENV_KEY}=remote-chrome://key@host:${DEFAULT_PORT} rech <playwright-args...>`,
+        `Usage:\n  rech serve\n  ${ENV_KEY}=http://key@host:${DEFAULT_PORT}?extension_id=ID&token=TOKEN rech <playwright-args...>\n  ${ENV_KEY}=https://key@host/path?extension_id=ID&token=TOKEN rech <playwright-args...>`,
       );
       process.exit(1);
     }
