@@ -39,7 +39,13 @@ async function loadEnv() {
   // Fall back to script dir's .env.local
   if (!process.env[ENV_KEY]) await loadEnvFile(envFile);
 }
+// Shell-set passthrough vars survive .env.local loading
+const _shellPassthrough: Record<string, string> = {};
+for (const k of ["PLAYWRIGHT_MCP_EXTENSION_ID","PLAYWRIGHT_MCP_EXTENSION_TOKEN","PLAYWRIGHT_MCP_USER_DATA_DIR","PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] as const) {
+  if (process.env[k]) _shellPassthrough[k] = process.env[k]!;
+}
 await loadEnv();
+Object.assign(process.env, _shellPassthrough);
 
 import { watch } from "node:fs";
 if (existsSync(envFile)) {
