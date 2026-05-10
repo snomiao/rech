@@ -1,6 +1,6 @@
 import { file } from "bun";
-import { createHash } from "crypto";
-import { mkdirSync } from "fs";
+import { createHash, X509Certificate } from "crypto";
+import { mkdirSync, unlinkSync } from "fs";
 import { join, resolve, relative, isAbsolute } from "path";
 import {
   log,
@@ -10,6 +10,32 @@ import {
   RECH_DIR,
   PASSTHROUGH_ENV_KEYS,
 } from "./rech.ts";
+
+const TAILSCALE_BIN = process.env.TAILSCALE_BIN || "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const CERT_RENEW_THRESHOLD_DAYS = 7;
+
+async function renewCertIfNeeded(certPath: string, keyPath: string): Promise<boolean> {
+  const certContent = await file(certPath).text().catch(() => null);
+  if (!certContent) return false;
+  try {
+    const cert = new X509Certificate(certContent);
+    const daysLeft = (new Date(cert.validTo).getTime() - Date.now()) / 86_400_000;
+    if (daysLeft > CERT_RENEW_THRESHOLD_DAYS) return false;
+    const domain = cert.subjectAltName?.match(/DNS:([^\s,]+)/)?.[1];
+    if (!domain) { log("TLS cert renewal: could not determine domain"); return false; }
+    log(`TLS cert expires in ${Math.floor(daysLeft)} days, renewing ${domain}...`);
+    const proc = Bun.spawn([TAILSCALE_BIN, "cert", "--cert-file", certPath, "--key-file", keyPath, domain], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    const [status, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (status !== 0) { log(`TLS cert renewal failed: ${stderr.trim()}`); return false; }
+    log(`TLS cert renewed for ${domain}`);
+    return true;
+  } catch (e) {
+    log(`TLS cert check error: ${e}`);
+    return false;
+  }
+}
 
 export function isUnderDir(base: string, candidate: string): boolean {
   const absBase = resolve(base) + "/";
@@ -46,9 +72,21 @@ export async function serve() {
   mkdirSync(workDir, { recursive: true });
 
   const listenHost = process.env.RECH_HOST || "127.0.0.1";
+  const certPath = process.env.RECH_TLS_CERT;
+  const keyPath = process.env.RECH_TLS_KEY;
+  if (certPath && keyPath) {
+    const renewed = await renewCertIfNeeded(certPath, keyPath);
+    if (renewed) { log("Restarting to load renewed TLS cert..."); process.exit(0); }
+    // Check daily; pm2 restarts cleanly after exit(0)
+    setInterval(async () => {
+      if (await renewCertIfNeeded(certPath, keyPath)) { log("Restarting to load renewed TLS cert..."); process.exit(0); }
+    }, 86_400_000);
+  }
+  const tls = certPath && keyPath ? { cert: Bun.file(certPath), key: Bun.file(keyPath) } : undefined;
   const server = Bun.serve({
     hostname: listenHost,
     port,
+    tls,
     async fetch(req) {
       const reqUrl = new URL(req.url);
 
@@ -128,7 +166,8 @@ export async function serve() {
       if (isOpenCmd && filteredArgs.length === 1)
         filteredArgs.push("about:blank");
 
-      if (isOpenCmd) {
+      // bare `rech open` with no URL: warn if session already has tabs
+      if (isOpenCmd && filteredArgs.length === 1) {
         try {
           const listProc = Bun.spawn([bin, ...binArgs, "tab-list", `-s=${namespacedSession}`], {
             cwd: workDir,
@@ -179,7 +218,29 @@ export async function serve() {
         XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
         ...(clientName ? { PLAYWRIGHT_MCP_CLIENT_NAME: clientName } : {}),
         ...passthroughEnv,
+        // Enable extension bridge when credentials are present
+        ...(passthroughEnv.PLAYWRIGHT_MCP_EXTENSION_ID && passthroughEnv.PLAYWRIGHT_MCP_EXTENSION_TOKEN
+          ? { PLAYWRIGHT_MCP_EXTENSION: "1" }
+          : {}),
       };
+      // For open commands: clean up stale sockets so a closed browser can be reopened
+      if (isOpenCmd) {
+        const tmpDir = (process.env.TMPDIR || "/tmp").replace(/\/$/, "");
+        const playwrightTmpDir = `${tmpDir}/playwright-cli`;
+        try {
+          const { readdirSync } = await import("fs");
+          for (const sub of readdirSync(playwrightTmpDir)) {
+            const subDir = `${playwrightTmpDir}/${sub}`;
+            for (const f of readdirSync(subDir)) {
+              if (f.startsWith(namespacedSession)) {
+                const sockPath = `${subDir}/${f}`;
+                try { unlinkSync(sockPath); log(`Removed stale socket: ${sockPath}`); } catch {}
+              }
+            }
+          }
+        } catch {}
+      }
+
       const proc = Bun.spawn([bin, ...binArgs, ...filteredArgs, `-s=${namespacedSession}`], {
         cwd: workDir,
         stdin: "ignore",
@@ -204,7 +265,7 @@ export async function serve() {
         timeout.then(() => [1, "", ""] as [number, string, string]),
       ]).catch(
         () => [1, "", `Command timed out after ${TIMEOUT / 1000}s\n`] as [number, string, string],
-      );
+      ) as [number, string, string];
 
       log(`exit: ${status}${stdout.trim() ? ` | ${stdout.trim().slice(0, 200)}` : ""}`);
 
@@ -242,6 +303,6 @@ export async function serve() {
     },
   });
 
-  log(`serving on http://${server.hostname}:${server.port}`);
+  log(`serving on ${tls ? "https" : "http"}://${server.hostname}:${server.port}`);
   log(`Connection URL set (use .env.local to view)`);
 }
