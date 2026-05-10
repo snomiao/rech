@@ -198,6 +198,52 @@ async function findChromeUserDataDir(): Promise<string | null> {
   return null;
 }
 
+export const EXTENSION_DIST_DIR = join(
+  import.meta.dir,
+  "lib/playwright-multi-tab/lib/playwright-mcp/packages/extension/dist",
+);
+
+// Walk all Chrome profiles' Secure Preferences and find an extension
+// whose loaded `path` matches our dist directory. The extension ID Chrome
+// generates for an unpacked extension is path-dependent, so we cannot rely
+// on a hardcoded ID across machines.
+async function findInstalledExtension(
+  profileDir?: string,
+): Promise<{ id: string; profile: string } | null> {
+  const userDataDir = await findChromeUserDataDir();
+  if (!userDataDir) return null;
+  const cache = await readChromeProfileCache();
+  const profiles = profileDir ? [profileDir] : (cache ? Object.keys(cache) : []);
+  for (const prof of profiles) {
+    const prefsPath = join(userDataDir, prof, "Secure Preferences");
+    const f = file(prefsPath);
+    if (!(await f.exists())) continue;
+    try {
+      const data = JSON.parse(await f.text());
+      const settings = data?.extensions?.settings ?? {};
+      for (const [extId, info] of Object.entries(settings as Record<string, any>)) {
+        if (info?.path === EXTENSION_DIST_DIR) return { id: extId, profile: prof };
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function printInstallInstructions(profileDisplay: string): void {
+  console.error("");
+  console.error("Multi-tab extension is not installed in this Chrome profile.");
+  console.error("");
+  console.error("To install:");
+  console.error("  1. Open chrome://extensions/ in the selected profile");
+  console.error(`     (profile: ${profileDisplay})`);
+  console.error("  2. Enable \"Developer mode\" (top-right toggle)");
+  console.error("  3. Click \"Load unpacked\"");
+  console.error("  4. Select this directory:");
+  console.error(`       ${EXTENSION_DIST_DIR}`);
+  console.error("  5. Re-run `rech setup`");
+  console.error("");
+}
+
 async function resolveProfileEmail(dir: string): Promise<string> {
   const cache = await readChromeProfileCache();
   if (cache?.[dir]?.user_name) return cache[dir].user_name;
@@ -313,11 +359,26 @@ async function setup(): Promise<void> {
   rl.close();
   const idx = parseInt(answer.trim()) - 1;
   if (isNaN(idx) || idx < 0 || idx >= profiles.length) { console.error("Invalid selection"); process.exit(1); }
-  const [profileDir] = profiles[idx];
+  const [profileDir, profileInfoSel] = profiles[idx];
   const profileEnv = { PLAYWRIGHT_MCP_PROFILE_DIRECTORY: profileDir };
+  const profileDisplay = profileInfoSel.user_name || profileInfoSel.name || profileDir;
 
-  // 3. Open extension status page with selected profile
-  const extId = process.env.PLAYWRIGHT_MCP_EXTENSION_ID || "cdepglbfomggelngpkklpghedmpcjjlm";
+  // 3. Discover the extension ID. Unpacked extension IDs are derived from the
+  //    load path, so look up the actual ID from Chrome's Secure Preferences.
+  //    Env override wins if set explicitly.
+  let extId = process.env.PLAYWRIGHT_MCP_EXTENSION_ID;
+  if (!extId) {
+    const found = await findInstalledExtension(profileDir);
+    if (found) extId = found.id;
+  }
+
+  if (!extId) {
+    printInstallInstructions(profileDisplay);
+    console.error("Opening chrome://extensions/ in the selected profile...");
+    await callServe(url, ["open", "chrome://extensions/"], profileEnv);
+    process.exit(1);
+  }
+
   const statusUrl = `chrome-extension://${extId}/status.html`;
   console.log(`\nOpening ${statusUrl}...`);
   const openResult = await callServe(url, ["open", statusUrl], profileEnv);
@@ -328,7 +389,9 @@ async function setup(): Promise<void> {
   const tokenMatch = evalResult.stdout.match(/"([A-Za-z0-9_-]{20,})"/);
   const token = tokenMatch?.[1];
   if (!token) {
-    console.error("Could not read token. Make sure the Playwright MCP Bridge extension is installed in this profile.");
+    printInstallInstructions(profileDisplay);
+    console.error("Tried to read the auth token from the extension's status page but failed.");
+    console.error("This usually means the extension is not loaded in this profile.");
     process.exit(1);
   }
 
@@ -340,8 +403,7 @@ async function setup(): Promise<void> {
   rechUrl.searchParams.set("extension_id", extId);
   rechUrl.searchParams.set("token", token);
   // Prefer email for readability, fall back to directory name
-  const [, profileInfo] = profiles[idx];
-  rechUrl.searchParams.set("profile", profileInfo.user_name || profileDir);
+  rechUrl.searchParams.set("profile", profileInfoSel.user_name || profileDir);
   const userDataDir = await findChromeUserDataDir();
   if (userDataDir) rechUrl.searchParams.set("user_data_dir", userDataDir);
   const newLine = `RECHROME_URL=${rechUrl.toString()}`;
