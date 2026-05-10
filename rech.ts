@@ -4,7 +4,7 @@ import { file } from "bun";
 import { randomBytes } from "crypto";
 import { mkdirSync, appendFileSync, existsSync } from "fs";
 import { hostname } from "os";
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 
 export const ENV_KEY = "RECHROME_URL";
 export const DEFAULT_PORT = 13775;
@@ -41,7 +41,7 @@ async function loadEnv() {
 }
 // Shell-set passthrough vars survive .env.local loading
 const _shellPassthrough: Record<string, string> = {};
-for (const k of ["PLAYWRIGHT_MCP_EXTENSION_ID","PLAYWRIGHT_MCP_EXTENSION_TOKEN","PLAYWRIGHT_MCP_USER_DATA_DIR","PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] as const) {
+for (const k of ["PLAYWRIGHT_MCP_EXTENSION_ID","PLAYWRIGHT_MCP_EXTENSION_TOKEN","PLAYWRIGHT_MCP_PROFILE_DIRECTORY","PLAYWRIGHT_MCP_USER_DATA_DIR"] as const) {
   if (process.env[k]) _shellPassthrough[k] = process.env[k]!;
 }
 await loadEnv();
@@ -59,8 +59,8 @@ if (existsSync(envFile)) {
 export const PASSTHROUGH_ENV_KEYS = [
   "PLAYWRIGHT_MCP_EXTENSION_ID",
   "PLAYWRIGHT_MCP_EXTENSION_TOKEN",
-  "PLAYWRIGHT_MCP_USER_DATA_DIR",
   "PLAYWRIGHT_MCP_PROFILE_DIRECTORY",
+  "PLAYWRIGHT_MCP_USER_DATA_DIR",
 ] as const;
 
 export function log(msg: string) {
@@ -85,6 +85,7 @@ export function parseUrl(raw: string) {
     extensionId: u.searchParams.get("extension_id") ?? undefined,
     extensionToken: u.searchParams.get("token") ?? undefined,
     profileDirectory: u.searchParams.get("profile") ?? undefined,
+    userDataDir: u.searchParams.get("user_data_dir") ?? undefined,
   };
 }
 
@@ -152,7 +153,7 @@ async function getClientIdentity(): Promise<{ gitUrl?: string; hostname?: string
   return { hostname: hostname(), cwd };
 }
 
-function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?: string; profileDirectory?: string }): Record<string, string> {
+function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?: string; profileDirectory?: string; userDataDir?: string }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of PASSTHROUGH_ENV_KEYS) {
     if (process.env[key]) env[key] = process.env[key];
@@ -163,70 +164,105 @@ function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?: strin
     env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = urlExtras.extensionToken;
   if (urlExtras?.profileDirectory)
     env["PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] = urlExtras.profileDirectory;
+  if (urlExtras?.userDataDir)
+    env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = urlExtras.userDataDir;
   return env;
 }
 
-async function resolveProfileEmail(dir: string): Promise<string> {
+const CHROME_LOCAL_STATE_PATHS = () => {
   const home = process.env.HOME || "~";
-  const candidates = [
+  return [
     join(home, "Library/Application Support/Google/Chrome/Local State"),
     join(home, ".config/google-chrome/Local State"),
     join(home, "AppData/Local/Google/Chrome/User Data/Local State"),
   ];
-  for (const statePath of candidates) {
+};
+
+async function readChromeProfileCache(): Promise<Record<string, { user_name?: string; name?: string }> | null> {
+  for (const statePath of CHROME_LOCAL_STATE_PATHS()) {
     const f = file(statePath);
     if (!(await f.exists())) continue;
     try {
       const data = JSON.parse(await f.text());
-      const info = data?.profile?.info_cache?.[dir];
-      if (info?.user_name) return info.user_name;
+      return data?.profile?.info_cache ?? null;
     } catch {}
   }
+  return null;
+}
+
+async function findChromeUserDataDir(): Promise<string | null> {
+  for (const statePath of CHROME_LOCAL_STATE_PATHS()) {
+    if (!(await file(statePath).exists())) continue;
+    return dirname(statePath);
+  }
+  return null;
+}
+
+async function resolveProfileEmail(dir: string): Promise<string> {
+  const cache = await readChromeProfileCache();
+  if (cache?.[dir]?.user_name) return cache[dir].user_name;
   return dir;
 }
 
-async function run(url: string, args: string[]) {
-  const { key, host, port, protocol, extensionId, extensionToken, profileDirectory } = parseUrl(url);
+async function listProfiles(): Promise<void> {
+  const cache = await readChromeProfileCache();
+  if (!cache) { console.error("Chrome Local State not found"); process.exit(1); }
 
-  // Effective profile: URL param takes priority over env var
-  const effectiveProfile = profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
-  const displayProfile = effectiveProfile ? await resolveProfileEmail(effectiveProfile) : undefined;
+  const current = process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
+  // Resolve email/name → dir for current marker
+  let currentDir = current;
+  if (current && !/^(Default|Profile \d+)$/i.test(current)) {
+    for (const [dir, info] of Object.entries(cache)) {
+      if (info.user_name === current || info.name === current) { currentDir = dir; break; }
+    }
+  }
 
+  const rows = Object.entries(cache).map(([dir, info]) => [
+    dir,
+    info.user_name || "",
+    info.name || "",
+    dir === currentDir ? "← current" : "",
+  ]);
+  const widths = rows.reduce((w, r) => r.map((c, i) => Math.max(w[i] ?? 0, c.length)), [] as number[]);
+  for (const row of rows) {
+    console.log(row.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd());
+  }
+}
+
+async function callServe(
+  url: string,
+  args: string[],
+  overrideEnv?: Record<string, string>,
+): Promise<{ status: number; stdout: string; stderr: string; files?: string[]; existingSession?: boolean }> {
+  const { key, host, port, protocol, extensionId, extensionToken, profileDirectory, userDataDir } = parseUrl(url);
   const identity = await getClientIdentity();
+  const effectiveProfile = profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
   if (effectiveProfile) (identity as any).profile = effectiveProfile;
+  const env = { ...getClientEnv({ extensionId, extensionToken, profileDirectory, userDataDir }), ...overrideEnv };
+  const res = await fetch(`${protocol}://${host}:${port}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ args, identity, env }),
+    signal: AbortSignal.timeout(70_000),
+  }).catch((e) => { console.error(`[rech] ${e.message}`); process.exit(1); });
+  if (res.status === 401) { console.error("Unauthorized: bad key"); process.exit(1); }
+  return res.json();
+}
 
+async function run(url: string, args: string[]) {
+  const { host, port, protocol } = parseUrl(url);
+  const effectiveProfile = parseUrl(url).profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
+  const displayProfile = effectiveProfile ? await resolveProfileEmail(effectiveProfile) : undefined;
+  const identity = await getClientIdentity();
   const profileSuffix = displayProfile ? ` profile:${displayProfile}` : "";
   console.error(
     `[rech] connecting to ${host}:${port} (identity: ${identity.gitUrl || `${identity.hostname}:${identity.cwd}`}${profileSuffix})`,
   );
-  const res = await fetch(`${protocol}://${host}:${port}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ args, identity, env: getClientEnv({ extensionId, extensionToken, profileDirectory }) }),
-    signal: AbortSignal.timeout(70_000),
-  }).catch((e) => {
-    console.error(`[rech] ${e.message}`);
-    process.exit(1);
-  });
 
-  if (res.status === 401) {
-    console.error("Unauthorized: bad key");
-    process.exit(1);
-  }
+  const { status, stdout, stderr, files, existingSession } = await callServe(url, args);
 
-  const { status, stdout, stderr, files, existingSession } = (await res.json()) as {
-    status: number;
-    stdout: string;
-    stderr: string;
-    files?: string[];
-    existingSession?: boolean;
-  };
-
-  if (existingSession) {
-    console.error(
-      `[rech] session already has open tabs — listing existing tabs instead of opening a new window`,
-    );
-  }
+  if (existingSession)
+    console.error(`[rech] session already has open tabs — listing existing tabs instead of opening a new window`);
   if (stderr) process.stderr.write(stderr);
   if (stdout) process.stdout.write(stdout);
 
@@ -237,7 +273,7 @@ async function run(url: string, args: string[]) {
     if (!existsSync(gitignorePath)) await Bun.write(gitignorePath, "*\n");
     for (const name of files) {
       const fileRes = await fetch(`${protocol}://${host}:${port}/files/${name}`, {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: { Authorization: `Bearer ${parseUrl(url).key}` },
       });
       if (!fileRes.ok) continue;
       const dest = join(dlDir, basename(name));
@@ -249,12 +285,87 @@ async function run(url: string, args: string[]) {
   process.exit(status);
 }
 
+async function setup(): Promise<void> {
+  // 1. Require serve to be running
+  const url = process.env[ENV_KEY];
+  if (!url) {
+    console.error(`${ENV_KEY} not set — start the server first:\n  rech serve`);
+    process.exit(1);
+  }
+  const { host, port, protocol } = parseUrl(url);
+  const ping = await fetch(`${protocol}://${host}:${port}/`, { signal: AbortSignal.timeout(3000) }).catch(() => null);
+  if (!ping) {
+    console.error(`rech serve is not running at ${host}:${port}\nStart it with:\n  rech serve`);
+    process.exit(1);
+  }
+
+  // 2. Interactive profile selection
+  const cache = await readChromeProfileCache();
+  if (!cache) { console.error("Chrome profiles not found"); process.exit(1); }
+  const profiles = Object.entries(cache);
+  console.log("\nAvailable Chrome profiles:");
+  profiles.forEach(([dir, info], i) =>
+    console.log(`  ${String(i + 1).padStart(2)}.  ${(info.user_name || "(no email)").padEnd(32)}  ${(info.name || "").padEnd(20)}  [${dir}]`)
+  );
+  const { createInterface } = await import("readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>(r => rl.question("\nProfile number: ", r));
+  rl.close();
+  const idx = parseInt(answer.trim()) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= profiles.length) { console.error("Invalid selection"); process.exit(1); }
+  const [profileDir] = profiles[idx];
+  const profileEnv = { PLAYWRIGHT_MCP_PROFILE_DIRECTORY: profileDir };
+
+  // 3. Open extension status page with selected profile
+  const extId = process.env.PLAYWRIGHT_MCP_EXTENSION_ID || "cdepglbfomggelngpkklpghedmpcjjlm";
+  const statusUrl = `chrome-extension://${extId}/status.html`;
+  console.log(`\nOpening ${statusUrl}...`);
+  const openResult = await callServe(url, ["open", statusUrl], profileEnv);
+  if (openResult.status !== 0) { process.stderr.write(openResult.stderr); process.exit(openResult.status); }
+
+  // 4. Read token from extension page localStorage
+  const evalResult = await callServe(url, ["eval", `() => localStorage.getItem('auth-token')`], profileEnv);
+  const tokenMatch = evalResult.stdout.match(/"([A-Za-z0-9_-]{20,})"/);
+  const token = tokenMatch?.[1];
+  if (!token) {
+    console.error("Could not read token. Make sure the Playwright MCP Bridge extension is installed in this profile.");
+    process.exit(1);
+  }
+
+  // 5. Write single RECHROME_URL with all params to ~/.env.local
+  const home = process.env.HOME!;
+  const globalEnvPath = join(home, ".env.local");
+  const existing = await file(globalEnvPath).text().catch(() => "");
+  const rechUrl = new URL(url);
+  rechUrl.searchParams.set("extension_id", extId);
+  rechUrl.searchParams.set("token", token);
+  // Prefer email for readability, fall back to directory name
+  const [, profileInfo] = profiles[idx];
+  rechUrl.searchParams.set("profile", profileInfo.user_name || profileDir);
+  const userDataDir = await findChromeUserDataDir();
+  if (userDataDir) rechUrl.searchParams.set("user_data_dir", userDataDir);
+  const newLine = `RECHROME_URL=${rechUrl.toString()}`;
+  // Remove old separate vars and update RECHROME_URL
+  const keysToRemove = ["PLAYWRIGHT_MCP_USER_DATA_DIR", "PLAYWRIGHT_MCP_EXTENSION_ID", "PLAYWRIGHT_MCP_EXTENSION_TOKEN", "PLAYWRIGHT_MCP_PROFILE_DIRECTORY"];
+  let lines = existing.trimEnd().split("\n").filter(l => !keysToRemove.some(k => l.startsWith(`${k}=`)));
+  const rechIdx = lines.findIndex(l => l.startsWith("RECHROME_URL="));
+  if (rechIdx >= 0) lines[rechIdx] = newLine;
+  else lines.push(newLine);
+  await Bun.write(globalEnvPath, lines.join("\n").trim() + "\n");
+  console.log(`\nSaved to ${globalEnvPath}:\n  ${newLine}`);
+  console.log("\nDone!");
+}
+
 if (import.meta.main) {
   const args = process.argv.slice(2);
 
   if (args[0] === "serve") {
     const { serve } = await import("./serve.ts");
     serve();
+  } else if (args[0] === "profiles") {
+    await listProfiles();
+  } else if (args[0] === "setup") {
+    await setup();
   } else {
     const url = process.env[ENV_KEY];
     if (!url) {
