@@ -1,6 +1,6 @@
 node_modules/
 .rech/
-.env.local
+*.local
 .playwright-cli-multi-tab/
 bun.lock
 rech.js
