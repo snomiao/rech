@@ -2,7 +2,7 @@
 
 import { file } from "bun";
 import { randomBytes } from "crypto";
-import { mkdirSync, appendFileSync, existsSync, unlinkSync } from "fs";
+import { mkdirSync, appendFileSync, existsSync, unlinkSync, realpathSync } from "fs";
 import { hostname } from "os";
 import { join, basename, dirname } from "path";
 
@@ -221,7 +221,12 @@ async function findInstalledExtension(
       const data = JSON.parse(await f.text());
       const settings = data?.extensions?.settings ?? {};
       for (const [extId, info] of Object.entries(settings as Record<string, any>)) {
-        if (info?.path === EXTENSION_DIST_DIR) return { id: extId, profile: prof };
+        if (!info?.path || info.state === 0) continue; // state 0 = explicitly disabled
+        let storedPath = info.path as string;
+        try { storedPath = realpathSync(storedPath); } catch {}
+        let distPath = EXTENSION_DIST_DIR;
+        try { distPath = realpathSync(distPath); } catch {}
+        if (storedPath === distPath) return { id: extId, profile: prof };
       }
     } catch {}
   }
@@ -507,12 +512,8 @@ async function setup(): Promise<void> {
   console.log("\n[3/4] Checking extension...");
   let extId: string | undefined;
   while (true) {
-    extId = process.env.PLAYWRIGHT_MCP_EXTENSION_ID || undefined;
-    if (!extId) {
-      const found = await findInstalledExtension(profileDir);
-      if (found) extId = found.id;
-    }
-    if (extId) break;
+    const found = await findInstalledExtension(profileDir);
+    if (found) { extId = found.id; break; }
 
     // Generate and open setup guide in system browser
     const setupHtmlPath = join(process.env.HOME!, ".rech", "setup.html");
