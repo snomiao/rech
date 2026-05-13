@@ -574,8 +574,9 @@ async function setup(): Promise<void> {
   if (rechIdx >= 0) lines[rechIdx] = newLine;
   else lines.push(newLine);
   await Bun.write(globalEnvPath, lines.join("\n").trim() + "\n");
-  console.log(`\nSaved to ${globalEnvPath}:\n  ${newLine}`);
-  console.log('\nDone! Test with: rech eval "() => document.title"');
+  console.log(`\nSaved to ${globalEnvPath}`);
+  console.log(`\n  ${newLine}`);
+  console.log(`\nDone! Test with:\n  rech eval "() => document.title"`);
 }
 
 function printHelp(): void {
