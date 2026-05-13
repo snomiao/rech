@@ -12,6 +12,7 @@ export const RECH_DIR = join(import.meta.dir, ".rech");
 export const LOG_DIR = join(RECH_DIR, "logs");
 
 const envFile = join(import.meta.dir, ".env.local");
+const globalEnvFile = join(process.env.HOME || "~", ".env.local");
 
 async function loadEnvFile(path: string): Promise<boolean> {
   const envRaw = await file(path).text().catch(() => "");
@@ -28,10 +29,12 @@ async function loadEnvFile(path: string): Promise<boolean> {
 }
 
 async function loadEnv() {
-  // Walk up from cwd first — project-local .env.local takes priority
+  // Load global ~/.env.local first (lowest priority — RECHROME_URL lives here)
+  await loadEnvFile(globalEnvFile);
+  // Walk up from cwd and overlay — local settings override global
   let dir = process.cwd();
   while (true) {
-    if (await loadEnvFile(join(dir, ".env.local"))) break;
+    await loadEnvFile(join(dir, ".env.local"));
     const parent = join(dir, "..");
     if (parent === dir) break;
     dir = parent;
@@ -94,10 +97,11 @@ export async function getOrCreateUrl(): Promise<string> {
   const key = randomBytes(9).toString("base64url"); // 12 chars
   const url = `http://${key}@127.0.0.1:${DEFAULT_PORT}`;
   const newLine = `${ENV_KEY}=${url}`;
-  const envRaw = await file(envFile).text().catch(() => "");
+  // Write to ~/.env.local so it's not shadowed by project .env.local
+  const envRaw = await file(globalEnvFile).text().catch(() => "");
   const lines = envRaw.trimEnd().split("\n").filter(l => !l.startsWith(`${ENV_KEY}=`));
   const content = [...lines, newLine, ""].join("\n");
-  Bun.write(envFile, content);
+  Bun.write(globalEnvFile, content);
   process.env[ENV_KEY] = url;
   return url;
 }
