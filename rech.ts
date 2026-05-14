@@ -83,6 +83,7 @@ export const PASSTHROUGH_ENV_KEYS = [
   "PLAYWRIGHT_MCP_EXTENSION_TOKEN",
   "PLAYWRIGHT_MCP_PROFILE_DIRECTORY",
   "PLAYWRIGHT_MCP_USER_DATA_DIR",
+  "PWMCP_TEST_CONNECTION_TIMEOUT",
 ] as const;
 
 function isReadable(p?: string): boolean {
@@ -191,9 +192,9 @@ async function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?:
     env["PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] = urlExtras.profileDirectory;
   if (urlExtras?.userDataDir)
     env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = urlExtras.userDataDir;
-  // Token: registry lookup by profile key, fallback to URL param
+  // Token: registry is authoritative (always overrides shell env), fallback to URL param
   const profileKey = urlExtras?.profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
-  if (profileKey && !env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]) {
+  if (profileKey) {
     const registry = await readTokenRegistry();
     const entry = registry[profileKey];
     if (entry) {
@@ -457,7 +458,8 @@ async function daemonInstall(serveUrl: string): Promise<boolean> {
   <dict>
     <key>HOME</key><string>${home}</string>
     <key>PATH</key><string>${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}</string>
-    <key>${ENV_KEY}</key><string>${serveUrl}</string>${process.env.PLAYWRIGHT_CLI ? `
+    <key>${ENV_KEY}</key><string>${serveUrl}</string>
+    <key>PWMCP_TEST_CONNECTION_TIMEOUT</key><string>${process.env.PWMCP_TEST_CONNECTION_TIMEOUT || "30000"}</string>${process.env.PLAYWRIGHT_CLI ? `
     <key>PLAYWRIGHT_CLI</key><string>${process.env.PLAYWRIGHT_CLI}</string>` : ""}${process.env.RECH_HOST ? `
     <key>RECH_HOST</key><string>${process.env.RECH_HOST}</string>` : ""}${isReadable(process.env.RECH_TLS_CERT) ? `
     <key>RECH_TLS_CERT</key><string>${process.env.RECH_TLS_CERT}</string>` : ""}${isReadable(process.env.RECH_TLS_KEY) ? `

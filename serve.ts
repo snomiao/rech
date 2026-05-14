@@ -118,7 +118,7 @@ export async function serve() {
       if (Array.isArray(body)) {
         args = body;
         const clientAddr = `${req.headers.get("x-forwarded-for") || server.requestIP(req)?.address || "unknown"}`;
-        sessionId = createHash("sha256").update(clientAddr).digest("hex").slice(0, 12);
+        sessionId = createHash("sha256").update(clientAddr).digest("hex").slice(0, 8);
         clientName = clientAddr;
         log(`session from client IP: ${clientAddr} -> ${sessionId}`);
       } else {
@@ -129,12 +129,12 @@ export async function serve() {
         const baseId = id?.gitUrl || (id?.hostname && id?.cwd ? `${id.hostname}:${id.cwd}` : null);
         const raw = baseId && id?.profile ? `${baseId}@${id.profile}` : baseId;
         if (raw) {
-          sessionId = createHash("sha256").update(raw).digest("hex").slice(0, 12);
+          sessionId = createHash("sha256").update(raw).digest("hex").slice(0, 8);
           clientName = raw;
           log(`session from identity: ${raw} -> ${sessionId}`);
         } else {
           const clientAddr = `${req.headers.get("x-forwarded-for") || server.requestIP(req)?.address || "unknown"}`;
-          sessionId = createHash("sha256").update(clientAddr).digest("hex").slice(0, 12);
+          sessionId = createHash("sha256").update(clientAddr).digest("hex").slice(0, 8);
           clientName = clientAddr;
           log(`session from client IP fallback: ${clientAddr} -> ${sessionId}`);
         }
