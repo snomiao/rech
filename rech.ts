@@ -565,11 +565,16 @@ async function setup(): Promise<void> {
     process.exit(1);
   }
   console.log("      Token accepted");
-  rl.close();
 
-  // Save config
-  const home = process.env.HOME!;
-  const globalEnvPath = join(home, ".env.local");
+  // Choose save location
+  const pwdEnvPath = join(process.cwd(), ".env.local");
+  const homeEnvPath = join(process.env.HOME!, ".env.local");
+  rl.resume();
+  const saveChoice = (await ask(
+    `\nSave RECHROME_URL to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${homeEnvPath} (user home)\n\n  Choice [1]: `
+  )).trim();
+  rl.close();
+  const globalEnvPath = saveChoice === "2" ? homeEnvPath : pwdEnvPath;
   const existing = await file(globalEnvPath).text().catch(() => "");
   const rechUrl = new URL(url);
   rechUrl.searchParams.set("extension_id", extId);
