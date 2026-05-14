@@ -11,6 +11,23 @@ export const DEFAULT_PORT = 13775;
 export const RECH_DIR = join(import.meta.dir, ".rech");
 export const LOG_DIR = join(RECH_DIR, "logs");
 
+const RECH_HOME_DIR = join(process.env.HOME!, ".rech");
+const TOKENS_FILE = join(RECH_HOME_DIR, "tokens.json");
+
+type TokenEntry = { extensionId: string; token: string; profileDir: string; userDataDir?: string };
+
+async function readTokenRegistry(): Promise<Record<string, TokenEntry>> {
+  const raw = await file(TOKENS_FILE).text().catch(() => "{}");
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+async function saveTokenEntry(profileEmail: string, entry: TokenEntry): Promise<void> {
+  mkdirSync(RECH_HOME_DIR, { recursive: true });
+  const registry = await readTokenRegistry();
+  registry[profileEmail] = entry;
+  await Bun.write(TOKENS_FILE, JSON.stringify(registry, null, 2) + "\n");
+}
+
 const envFile = join(import.meta.dir, ".env.local");
 const globalEnvFile = join(process.env.HOME || "~", ".env.local");
 
@@ -160,19 +177,30 @@ async function getClientIdentity(): Promise<{ gitUrl?: string; hostname?: string
   return { hostname: hostname(), cwd };
 }
 
-function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?: string; profileDirectory?: string; userDataDir?: string }): Record<string, string> {
+async function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?: string; profileDirectory?: string; userDataDir?: string }): Promise<Record<string, string>> {
   const env: Record<string, string> = {};
   for (const key of PASSTHROUGH_ENV_KEYS) {
     if (process.env[key]) env[key] = process.env[key];
   }
   if (urlExtras?.extensionId)
     env["PLAYWRIGHT_MCP_EXTENSION_ID"] = urlExtras.extensionId;
-  if (urlExtras?.extensionToken)
-    env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = urlExtras.extensionToken;
   if (urlExtras?.profileDirectory)
     env["PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] = urlExtras.profileDirectory;
   if (urlExtras?.userDataDir)
     env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = urlExtras.userDataDir;
+  // Token: registry lookup by profile key, fallback to URL param
+  const profileKey = urlExtras?.profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
+  if (profileKey && !env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]) {
+    const registry = await readTokenRegistry();
+    const entry = registry[profileKey];
+    if (entry) {
+      env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = entry.token;
+      if (!env["PLAYWRIGHT_MCP_EXTENSION_ID"]) env["PLAYWRIGHT_MCP_EXTENSION_ID"] = entry.extensionId;
+      if (!env["PLAYWRIGHT_MCP_USER_DATA_DIR"] && entry.userDataDir) env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = entry.userDataDir;
+    }
+  }
+  if (!env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] && urlExtras?.extensionToken)
+    env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = urlExtras.extensionToken;
   return env;
 }
 
@@ -296,7 +324,7 @@ async function callServe(
   const identity = await getClientIdentity();
   const effectiveProfile = profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
   if (effectiveProfile) (identity as any).profile = effectiveProfile;
-  const env = { ...getClientEnv({ extensionId, extensionToken, profileDirectory, userDataDir }), ...overrideEnv };
+  const env = { ...(await getClientEnv({ extensionId, extensionToken, profileDirectory, userDataDir })), ...overrideEnv };
   const res = await fetch(`${protocol}://${host}:${port}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
@@ -513,84 +541,83 @@ async function setup(): Promise<void> {
     console.log(`      Serve running at ${protocol}://${host}:${port}`);
   }
 
-  // [2/4] Profile selection
-  console.log("\n[2/4] Select Chrome profile:");
   const cache = await readChromeProfileCache();
   if (!cache) { console.error("      Chrome profiles not found"); rl.close(); process.exit(1); }
-  const profiles = Object.entries(cache);
-  profiles.forEach(([dir, info], i) =>
-    console.log(`        ${String(i + 1).padStart(2)}.  ${(info.user_name || "(no email)").padEnd(32)}  ${(info.name || "").padEnd(20)}  [${dir}]`)
-  );
-  const answer = await ask("\n      Profile number: ");
-  rl.pause();
-  const idx = parseInt(answer.trim()) - 1;
-  if (isNaN(idx) || idx < 0 || idx >= profiles.length) { console.error("      Invalid selection"); rl.close(); process.exit(1); }
-  const [profileDir, profileInfoSel] = profiles[idx];
-  const profileEnv = { PLAYWRIGHT_MCP_PROFILE_DIRECTORY: profileDir };
+  const userDataDir = await findChromeUserDataDir();
+
+  async function pickProfile(exclude: Set<string>): Promise<[string, { user_name?: string; name?: string }] | null> {
+    const available = Object.entries(cache!).filter(([dir]) => !exclude.has(dir));
+    if (!available.length) return null;
+    available.forEach(([dir, info], i) =>
+      console.log(`        ${String(i + 1).padStart(2)}.  ${(info.user_name || "(no email)").padEnd(32)}  ${(info.name || "").padEnd(20)}  [${dir}]`)
+    );
+    const answer = await ask("\n      Profile number: ");
+    const idx = parseInt(answer.trim()) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= available.length) return null;
+    return available[idx];
+  }
+
+  async function getExtAndToken(profileDir: string, profileDisplay: string): Promise<{ extId: string; token: string } | null> {
+    // Extension check
+    let extId: string | undefined;
+    while (true) {
+      const found = await findInstalledExtension(profileDir);
+      if (found) { extId = found.id; break; }
+      const setupHtmlPath = join(RECH_HOME_DIR, "setup.html");
+      mkdirSync(RECH_HOME_DIR, { recursive: true });
+      await Bun.write(setupHtmlPath, buildSetupHtml(EXTENSION_DIST_DIR, profileDisplay));
+      console.log(`\n      Extension not found in profile: ${profileDisplay}`);
+      console.log(`      Extension dist: ${EXTENSION_DIST_DIR}`);
+      console.log(`\n      Opening install guide in your browser...`);
+      Bun.spawn(["open", setupHtmlPath], { stdout: "ignore", stderr: "ignore" });
+      await ask("\n      Press Enter after loading the extension to retry...");
+    }
+    console.log(`      Extension found: ${extId}`);
+
+    // Token
+    const statusUrl = `chrome-extension://${extId}/status.html`;
+    console.log(`\n      Get auth token from the extension:`);
+    console.log(`        ${statusUrl}`);
+    Bun.spawn(
+      ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+       `--profile-directory=${profileDir}`, statusUrl],
+      { stdout: "ignore", stderr: "ignore", detached: true },
+    );
+    console.log(`\n      Or click the extension icon in the Chrome toolbar.`);
+    console.log(`      Copy the token shown on the page (PLAYWRIGHT_MCP_EXTENSION_TOKEN=...).\n`);
+    const tokenInput = (await ask("      Paste token: ")).trim();
+    const token = tokenInput.replace(/^.*?=/, "").trim();
+    if (!token || token.length < 20) { console.error("      Invalid token (too short)"); return null; }
+    console.log("      Token accepted");
+    return { extId, token };
+  }
+
+  // [2/4] Primary profile
+  console.log("\n[2/4] Select Chrome profile:");
+  const picked = await pickProfile(new Set());
+  if (!picked) { console.error("      Invalid selection"); rl.close(); process.exit(1); }
+  const [profileDir, profileInfoSel] = picked;
   const profileDisplay = profileInfoSel.user_name || profileInfoSel.name || profileDir;
 
-  // [3/4] Extension
+  // [3+4/4] Extension + token for primary profile
   console.log("\n[3/4] Checking extension...");
-  let extId: string | undefined;
-  while (true) {
-    const found = await findInstalledExtension(profileDir);
-    if (found) { extId = found.id; break; }
+  const primary = await getExtAndToken(profileDir, profileDisplay);
+  if (!primary) { rl.close(); process.exit(1); }
+  const { extId, token } = primary;
+  const profileEmail = profileInfoSel.user_name || profileDir;
 
-    // Generate and open setup guide in system browser
-    const setupHtmlPath = join(process.env.HOME!, ".rech", "setup.html");
-    mkdirSync(join(process.env.HOME!, ".rech"), { recursive: true });
-    await Bun.write(setupHtmlPath, buildSetupHtml(EXTENSION_DIST_DIR, profileDisplay));
-    console.log(`\n      Extension not found in profile: ${profileDisplay}`);
-    console.log(`      Extension dist: ${EXTENSION_DIST_DIR}`);
-    console.log(`\n      Opening install guide in your browser...`);
-    Bun.spawn(["open", setupHtmlPath], { stdout: "ignore", stderr: "ignore" });
-    rl.resume();
-    await ask("\n      Press Enter after loading the extension to retry...");
-    rl.pause();
-  }
-  console.log(`      Extension found: ${extId}`);
-
-  // [4/4] Token — open status.html directly in Chrome (no bridge yet, no stale token)
-  const statusUrl = `chrome-extension://${extId}/status.html`;
-  console.log(`\n[4/4] Get auth token from the extension:`);
-  console.log(`        ${statusUrl}`);
-
-  // Open via Chrome CLI with explicit profile — avoids using any stale extension token
-  Bun.spawn(
-    ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-     `--profile-directory=${profileDir}`, statusUrl],
-    { stdout: "ignore", stderr: "ignore", detached: true },
-  );
-
-  console.log(`\n      Or click the extension icon in the Chrome toolbar.`);
-  console.log(`      Copy the token shown on the page (PLAYWRIGHT_MCP_EXTENSION_TOKEN=...).\n`);
-  rl.resume();
-  const tokenInput = (await ask("      Paste token: ")).trim();
-  rl.pause();
-  // Accept bare token or KEY=value format
-  const token = tokenInput.replace(/^.*?=/, "").trim();
-  if (!token || token.length < 20) {
-    console.error("      Invalid token (too short)");
-    rl.close();
-    process.exit(1);
-  }
-  console.log("      Token accepted");
-
-  // Choose save location
+  // Save RECHROME_URL
   const pwdEnvPath = join(process.cwd(), ".env.local");
   const homeEnvPath = join(process.env.HOME!, ".env.local");
-  rl.resume();
   const saveChoice = (await ask(
-    `\nSave RECHROME_URL to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${homeEnvPath} (user home)\n\n  Choice [1]: `
+    `\n[4/4] Save RECHROME_URL to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${homeEnvPath} (user home)\n\n  Choice [1]: `
   )).trim();
-  rl.close();
   const globalEnvPath = saveChoice === "2" ? homeEnvPath : pwdEnvPath;
   const existing = await file(globalEnvPath).text().catch(() => "");
   const rechUrl = new URL(url);
   rechUrl.searchParams.set("extension_id", extId);
   rechUrl.searchParams.set("token", token);
-  rechUrl.searchParams.set("profile", profileInfoSel.user_name || profileDir);
-  const userDataDir = await findChromeUserDataDir();
+  rechUrl.searchParams.set("profile", profileEmail);
   if (userDataDir) rechUrl.searchParams.set("user_data_dir", userDataDir);
   const newLine = `RECHROME_URL=${rechUrl.toString()}`;
   const keysToRemove = ["PLAYWRIGHT_MCP_USER_DATA_DIR", "PLAYWRIGHT_MCP_EXTENSION_ID", "PLAYWRIGHT_MCP_EXTENSION_TOKEN", "PLAYWRIGHT_MCP_PROFILE_DIRECTORY"];
@@ -601,6 +628,30 @@ async function setup(): Promise<void> {
   await Bun.write(globalEnvPath, lines.join("\n").trim() + "\n");
   console.log(`\nSaved to ${globalEnvPath}`);
   console.log(`\n  ${newLine}`);
+
+  // Save primary to token registry
+  await saveTokenEntry(profileEmail, { extensionId: extId, token, profileDir, userDataDir: userDataDir ?? undefined });
+
+  // Additional profiles
+  const configured = new Set([profileDir]);
+  while (true) {
+    const more = (await ask("\nAdd another profile? [y/N]: ")).trim().toLowerCase();
+    if (more !== "y" && more !== "yes") break;
+    const remaining = Object.entries(cache!).filter(([dir]) => !configured.has(dir));
+    if (!remaining.length) { console.log("      No more profiles available."); break; }
+    console.log("\n      Select additional profile:");
+    const extra = await pickProfile(configured);
+    if (!extra) { console.log("      Skipped."); continue; }
+    const [extraDir, extraInfo] = extra;
+    const extraDisplay = extraInfo.user_name || extraInfo.name || extraDir;
+    console.log(`\n      Setting up: ${extraDisplay}`);
+    const result = await getExtAndToken(extraDir, extraDisplay);
+    if (!result) { console.log("      Skipped."); continue; }
+    const extraEmail = extraInfo.user_name || extraDir;
+    await saveTokenEntry(extraEmail, { extensionId: result.extId, token: result.token, profileDir: extraDir, userDataDir: userDataDir ?? undefined });
+    configured.add(extraDir);
+    console.log(`      Saved token for ${extraDisplay}`);
+  }
   rl.close();
   envWatcher?.close();
   console.log(`\nDone! Test with:\n  rech eval "() => document.title"`);
@@ -621,15 +672,23 @@ async function status(): Promise<void> {
   const listenLine = lsofOut.split("\n").find(l => l.includes(`:${port}`));
   const listenAddr = listenLine?.match(/TCP\s+(\S+:\d+)/)?.[1] ?? (ping ? `${host}:${port}` : null);
   console.log(`serve:    ${ping ? `running  ${protocol}://${listenAddr ?? `${host}:${port}`}` : "not running"}`);
-  if (parsed.extensionId) console.log(`ext:      ${parsed.extensionId}`);
-  if (parsed.profileDirectory) {
-    const email = await resolveProfileEmail(parsed.profileDirectory).catch(() => parsed.profileDirectory);
-    const profileLabel = email !== parsed.profileDirectory ? `${email} (${parsed.profileDirectory})` : email;
-    console.log(`profile:  ${profileLabel}`);
-  }
-  if (parsed.userDataDir) console.log(`data dir: ${parsed.userDataDir}`);
   const launchdRunning = process.platform === "darwin" && existsSync(LAUNCHD_PLIST);
   console.log(`daemon:   ${launchdRunning ? `launchd (${LAUNCHD_LABEL})` : "not installed"}`);
+  const registry = await readTokenRegistry();
+  const entries = Object.entries(registry);
+  if (entries.length) {
+    console.log(`\nprofiles:`);
+    const primaryProfile = parsed.profileDirectory;
+    for (const [email, entry] of entries) {
+      const isPrimary = email === primaryProfile || entry.profileDir === primaryProfile;
+      const marker = isPrimary ? " (primary)" : "";
+      console.log(`  ${email.padEnd(36)}  [${entry.profileDir}]  ext: ${entry.extensionId.slice(0, 8)}…  token: ${entry.token.slice(0, 8)}…${marker}`);
+    }
+  } else if (parsed.profileDirectory) {
+    // Legacy: no registry yet, show from RECHROME_URL
+    const email = await resolveProfileEmail(parsed.profileDirectory).catch(() => parsed.profileDirectory);
+    console.log(`\nprofiles:\n  ${email}  [${parsed.profileDirectory}]  (legacy — re-run \`rech setup\` to register)`);
+  }
 }
 
 function printHelp(): void {
