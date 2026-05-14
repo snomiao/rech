@@ -51,12 +51,9 @@ await loadEnv();
 Object.assign(process.env, _shellPassthrough);
 
 import { watch } from "node:fs";
-if (existsSync(envFile)) {
-  watch(envFile, async () => {
-    log(".env.local changed, reloading");
-    await loadEnv();
-  });
-}
+const envWatcher = existsSync(envFile)
+  ? watch(envFile, async () => { log(".env.local changed, reloading"); await loadEnv(); })
+  : null;
 
 
 export const PASSTHROUGH_ENV_KEYS = [
@@ -591,8 +588,9 @@ async function setup(): Promise<void> {
   await Bun.write(globalEnvPath, lines.join("\n").trim() + "\n");
   console.log(`\nSaved to ${globalEnvPath}`);
   console.log(`\n  ${newLine}`);
+  rl.close();
+  envWatcher?.close();
   console.log(`\nDone! Test with:\n  rech eval "() => document.title"`);
-  process.exit(0);
 }
 
 function printHelp(): void {
