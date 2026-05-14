@@ -466,9 +466,13 @@ async function setup(): Promise<void> {
   let ping = await fetch(`${protocol}://${host}:${port}/`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
   if (ping) {
     console.log(`      Already running at ${protocol}://${host}:${port}`);
-    if (process.platform === "darwin" && !existsSync(LAUNCHD_PLIST)) {
-      await daemonInstall(url);
-      console.log(`      Registered as login daemon: ${LAUNCHD_LABEL}`);
+    if (process.platform === "darwin") {
+      const plistContent = await file(LAUNCHD_PLIST).text().catch(() => "");
+      const plistKey = plistContent.match(new RegExp(`<key>${ENV_KEY}</key><string>http://([^@]+)@`))?.[1];
+      if (!existsSync(LAUNCHD_PLIST) || plistKey !== parseUrl(url).key) {
+        await daemonInstall(url);
+        console.log(`      ${existsSync(LAUNCHD_PLIST) ? "Updated" : "Registered"} login daemon: ${LAUNCHD_LABEL}`);
+      }
     }
   } else {
     if (process.platform === "darwin") {
