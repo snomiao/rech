@@ -479,10 +479,14 @@ async function daemonUninstall(): Promise<void> {
   console.log(`Removed oxmgr process: ${OXMGR_PROCESS_NAME}`);
 }
 
-async function setup(): Promise<void> {
+async function setup(opts: { profile?: string } = {}): Promise<void> {
   const { createInterface } = await import("readline");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const ask = (q: string) => new Promise<string>(r => rl.question(q, r));
+  const isTTY = process.stdin.isTTY ?? false;
+  const rl = isTTY ? createInterface({ input: process.stdin, output: process.stdout }) : null;
+  const ask = (q: string, def = "") => {
+    if (!rl) { process.stdout.write(`${q}${def}\n`); return Promise.resolve(def); }
+    return new Promise<string>(r => rl.question(q, r));
+  };
 
   // [1/4] Daemon
   console.log("\n[1/4] Setting up serve daemon...");
@@ -514,14 +518,14 @@ async function setup(): Promise<void> {
     process.stdout.write("\n");
     if (!ping) {
       console.error(`      Failed to start serve at ${host}:${port}`);
-      rl.close();
+      rl?.close();
       process.exit(1);
     }
     console.log(`      Serve running at ${protocol}://${host}:${port}`);
   }
 
   const cache = await readChromeProfileCache();
-  if (!cache) { console.error("      Chrome profiles not found"); rl.close(); process.exit(1); }
+  if (!cache) { console.error("      Chrome profiles not found"); rl?.close(); process.exit(1); }
   const userDataDir = await findChromeUserDataDir();
 
   async function pickProfile(exclude: Set<string>): Promise<[string, { user_name?: string; name?: string }] | null> {
@@ -530,6 +534,17 @@ async function setup(): Promise<void> {
     available.forEach(([dir, info], i) =>
       console.log(`        ${String(i + 1).padStart(2)}.  ${(info.user_name || "(no email)").padEnd(32)}  ${(info.name || "").padEnd(20)}  [${dir}]`)
     );
+    if (opts.profile !== undefined) {
+      const num = parseInt(opts.profile);
+      if (!isNaN(num)) return available[num - 1] ?? null;
+      return available.find(([, info]) =>
+        (info.user_name ?? "").toLowerCase().includes(opts.profile!.toLowerCase())
+      ) ?? null;
+    }
+    if (!isTTY) {
+      console.log("      Non-TTY: auto-selecting first profile");
+      return available[0] ?? null;
+    }
     const answer = await ask("\n      Profile number: ");
     const idx = parseInt(answer.trim()) - 1;
     if (isNaN(idx) || idx < 0 || idx >= available.length) return null;
@@ -574,14 +589,14 @@ async function setup(): Promise<void> {
   // [2/4] Primary profile
   console.log("\n[2/4] Select Chrome profile:");
   const picked = await pickProfile(new Set());
-  if (!picked) { console.error("      Invalid selection"); rl.close(); process.exit(1); }
+  if (!picked) { console.error("      Invalid selection"); rl?.close(); process.exit(1); }
   const [profileDir, profileInfoSel] = picked;
   const profileDisplay = profileInfoSel.user_name || profileInfoSel.name || profileDir;
 
   // [3+4/4] Extension + token for primary profile
   console.log("\n[3/4] Checking extension...");
   const primary = await getExtAndToken(profileDir, profileDisplay);
-  if (!primary) { rl.close(); process.exit(1); }
+  if (!primary) { rl?.close(); process.exit(1); }
   const { extId, token } = primary;
   const profileEmail = profileInfoSel.user_name || profileDir;
 
@@ -633,7 +648,7 @@ async function setup(): Promise<void> {
     configured.add(extraDir);
     console.log(`      Saved token for ${extraDisplay}`);
   }
-  rl.close();
+  rl?.close();
   envWatcher?.close();
   console.log(`\nDone! Test with:\n  rech eval "() => document.title"`);
 }
@@ -709,7 +724,11 @@ if (import.meta.main) {
     await listProfiles();
     envWatcher?.close();
   } else if (cmd === "setup") {
-    await setup(); // setup closes envWatcher itself before printing Done
+    const profileIdx = args.indexOf("--profile");
+    const profile = profileIdx !== -1
+      ? args[profileIdx + 1]
+      : args.find(a => a.startsWith("--profile="))?.slice("--profile=".length);
+    await setup({ profile }); // setup closes envWatcher itself before printing Done
   } else if (cmd === "uninstall") {
     await daemonUninstall();
     envWatcher?.close();
