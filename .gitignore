@@ -5,3 +5,4 @@ node_modules/
 bun.lock
 rech.js
 serve.js
+.playwright-cli/
