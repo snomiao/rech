@@ -46,7 +46,8 @@ async function loadEnvFile(path: string): Promise<boolean> {
 }
 
 async function loadEnv() {
-  // Collect dirs from CWD up to root, then load root→CWD so CWD wins
+  // Collect dirs from CWD up to root, load root→CWD so CWD wins.
+  // At each level: .env.local first, then .rechrome/.env.local on top (rechrome-specific).
   const dirs: string[] = [];
   let dir = process.cwd();
   while (true) {
@@ -57,9 +58,13 @@ async function loadEnv() {
   }
   for (const d of dirs.reverse()) {
     await loadEnvFile(join(d, ".env.local"));
+    await loadEnvFile(join(d, ".rechrome", ".env.local"));
   }
-  // Fall back to script dir's .env.local if still no RECHROME_URL
-  if (!process.env[ENV_KEY]) await loadEnvFile(envFile);
+  // Fall back to script dir's config if still no RECHROME_URL
+  if (!process.env[ENV_KEY]) {
+    await loadEnvFile(envFile);
+    await loadEnvFile(join(import.meta.dir, ".rechrome", ".env.local"));
+  }
 }
 // Shell-set passthrough vars survive .env.local loading
 const _shellPassthrough: Record<string, string> = {};
@@ -608,11 +613,13 @@ async function setup(): Promise<void> {
 
   // Save RECHROME_URL
   const pwdEnvPath = join(process.cwd(), ".env.local");
+  const pwdRechPath = join(process.cwd(), ".rechrome", ".env.local");
   const homeEnvPath = join(process.env.HOME!, ".env.local");
   const saveChoice = (await ask(
-    `\n[4/4] Save RECHROME_URL to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${homeEnvPath} (user home)\n\n  Choice [1]: `
+    `\n[4/4] Save RECHROME_URL to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${pwdRechPath} (current dir, rechrome-only)\n  3. ${homeEnvPath} (user home)\n\n  Choice [1]: `
   )).trim();
-  const globalEnvPath = saveChoice === "2" ? homeEnvPath : pwdEnvPath;
+  const globalEnvPath = saveChoice === "3" ? homeEnvPath : saveChoice === "2" ? pwdRechPath : pwdEnvPath;
+  if (saveChoice === "2") mkdirSync(join(process.cwd(), ".rechrome"), { recursive: true });
   const existing = await file(globalEnvPath).text().catch(() => "");
   const rechUrl = new URL(url);
   rechUrl.searchParams.set("extension_id", extId);
