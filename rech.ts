@@ -2,7 +2,7 @@
 
 import { file } from "bun";
 import { randomBytes } from "crypto";
-import { mkdirSync, appendFileSync, existsSync, unlinkSync, realpathSync, accessSync, constants as fsConstants } from "fs";
+import { mkdirSync, appendFileSync, existsSync, realpathSync, accessSync, constants as fsConstants } from "fs";
 import { hostname } from "os";
 import { join, basename, dirname } from "path";
 
@@ -192,15 +192,19 @@ async function getClientEnv(urlExtras?: { extensionId?: string; extensionToken?:
     env["PLAYWRIGHT_MCP_PROFILE_DIRECTORY"] = urlExtras.profileDirectory;
   if (urlExtras?.userDataDir)
     env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = urlExtras.userDataDir;
-  // Token: registry is authoritative (always overrides shell env), fallback to URL param
+  // Token: shell env wins (explicit override), registry is fallback, URL param is last resort
   const profileKey = urlExtras?.profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
   if (profileKey) {
     const registry = await readTokenRegistry();
     const entry = registry[profileKey];
     if (entry) {
-      env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = entry.token;
       if (!env["PLAYWRIGHT_MCP_EXTENSION_ID"]) env["PLAYWRIGHT_MCP_EXTENSION_ID"] = entry.extensionId;
       if (!env["PLAYWRIGHT_MCP_USER_DATA_DIR"] && entry.userDataDir) env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = entry.userDataDir;
+      if (!env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]) {
+        env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = entry.token;
+      } else if (env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] !== entry.token) {
+        console.error(`[rech] warning: shell PLAYWRIGHT_MCP_EXTENSION_TOKEN differs from registry token for "${profileKey}" — using shell value. Run \`unset PLAYWRIGHT_MCP_EXTENSION_TOKEN\` to use the registry.`);
+      }
     }
   }
   if (!env["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] && urlExtras?.extensionToken)
@@ -433,59 +437,46 @@ function buildSetupHtml(extDistDir: string, profileDisplay: string): string {
 </html>`;
 }
 
-const LAUNCHD_LABEL = "com.rechrome.serve";
-const LAUNCHD_PLIST = join(process.env.HOME!, "Library/LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+const OXMGR_PROCESS_NAME = "rechrome-serve";
 
-async function daemonInstall(serveUrl: string): Promise<boolean> {
+async function runOxmgr(args: string[]): Promise<number> {
+  const proc = Bun.spawn(["bunx", "oxmgr", ...args], { stdout: "inherit", stderr: "inherit" });
+  await proc.exited;
+  return proc.exitCode ?? 1;
+}
+
+async function daemonInstall(serveUrl: string): Promise<void> {
   const home = process.env.HOME!;
-  const logDir = join(home, ".rech", "logs");
-  mkdirSync(logDir, { recursive: true });
-  // Use absolute bun + script paths — launchd has no user PATH
   const bunBin = Bun.which("bun") ?? process.execPath;
   const rechScript = import.meta.filename;
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${bunBin}</string>
-    <string>${rechScript}</string>
-    <string>serve</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>HOME</key><string>${home}</string>
-    <key>PATH</key><string>${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}</string>
-    <key>${ENV_KEY}</key><string>${serveUrl}</string>
-    <key>PWMCP_TEST_CONNECTION_TIMEOUT</key><string>${process.env.PWMCP_TEST_CONNECTION_TIMEOUT || "30000"}</string>${process.env.PLAYWRIGHT_CLI ? `
-    <key>PLAYWRIGHT_CLI</key><string>${process.env.PLAYWRIGHT_CLI}</string>` : ""}${process.env.RECH_HOST ? `
-    <key>RECH_HOST</key><string>${process.env.RECH_HOST}</string>` : ""}${isReadable(process.env.RECH_TLS_CERT) ? `
-    <key>RECH_TLS_CERT</key><string>${process.env.RECH_TLS_CERT}</string>` : ""}${isReadable(process.env.RECH_TLS_KEY) ? `
-    <key>RECH_TLS_KEY</key><string>${process.env.RECH_TLS_KEY}</string>` : ""}
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${join(logDir, "serve.out.log")}</string>
-  <key>StandardErrorPath</key><string>${join(logDir, "serve.err.log")}</string>
-  <key>WorkingDirectory</key><string>${home}</string>
-</dict>
-</plist>`;
-  const existing = await file(LAUNCHD_PLIST).text().catch(() => "");
-  if (existing === plist) return false; // nothing changed
-  await Bun.write(LAUNCHD_PLIST, plist);
-  await Bun.spawn(["launchctl", "unload", LAUNCHD_PLIST], { stdout: "ignore", stderr: "ignore" }).exited;
-  const proc = Bun.spawn(["launchctl", "load", "-w", LAUNCHD_PLIST], { stdout: "ignore", stderr: "ignore" });
-  await proc.exited;
-  return proc.exitCode === 0;
+
+  const envArgs: string[] = [
+    "--env", `HOME=${home}`,
+    "--env", `PATH=${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}`,
+    "--env", `${ENV_KEY}=${serveUrl}`,
+    "--env", `PWMCP_TEST_CONNECTION_TIMEOUT=${process.env.PWMCP_TEST_CONNECTION_TIMEOUT || "30000"}`,
+  ];
+  if (process.env.PLAYWRIGHT_CLI) envArgs.push("--env", `PLAYWRIGHT_CLI=${process.env.PLAYWRIGHT_CLI}`);
+  if (process.env.RECH_HOST) envArgs.push("--env", `RECH_HOST=${process.env.RECH_HOST}`);
+  if (isReadable(process.env.RECH_TLS_CERT)) envArgs.push("--env", `RECH_TLS_CERT=${process.env.RECH_TLS_CERT}`);
+  if (isReadable(process.env.RECH_TLS_KEY)) envArgs.push("--env", `RECH_TLS_KEY=${process.env.RECH_TLS_KEY}`);
+
+  await runOxmgr(["delete", OXMGR_PROCESS_NAME]).catch(() => {});
+  await runOxmgr([
+    "start",
+    "--name", OXMGR_PROCESS_NAME,
+    "--restart", "always",
+    "--cwd", home,
+    ...envArgs,
+    `${bunBin} ${rechScript} serve`,
+  ]);
+  await runOxmgr(["service", "install"]);
 }
 
 async function daemonUninstall(): Promise<void> {
-  const proc = Bun.spawn(["launchctl", "unload", "-w", LAUNCHD_PLIST], { stdout: "ignore", stderr: "ignore" });
-  await proc.exited;
-  try { unlinkSync(LAUNCHD_PLIST); } catch {}
-  console.log(`Removed launchd agent: ${LAUNCHD_LABEL}`);
+  await runOxmgr(["delete", OXMGR_PROCESS_NAME]);
+  await runOxmgr(["service", "uninstall"]);
+  console.log(`Removed oxmgr process: ${OXMGR_PROCESS_NAME}`);
 }
 
 async function setup(): Promise<void> {
@@ -495,7 +486,6 @@ async function setup(): Promise<void> {
 
   // [1/4] Daemon
   console.log("\n[1/4] Setting up serve daemon...");
-  const rechBin = Bun.which("rech") ?? process.execPath;
   // Clear stale hostname-based URL so we always use 127.0.0.1 locally
   if (process.env[ENV_KEY]) {
     try {
@@ -509,35 +499,19 @@ async function setup(): Promise<void> {
   let ping = await fetch(`${protocol}://${host}:${port}/`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
   if (ping) {
     console.log(`      Already running at ${protocol}://${host}:${port}`);
-    if (process.platform === "darwin") {
-      const existed = existsSync(LAUNCHD_PLIST);
-      const reinstalled = await daemonInstall(url);
-      if (reinstalled) console.log(`      ${existed ? "Updated" : "Registered"} login daemon: ${LAUNCHD_LABEL}`);
-    }
+    await daemonInstall(url);
+    console.log(`      Updated daemon: ${OXMGR_PROCESS_NAME}`);
   } else {
-    if (process.platform === "darwin") {
-      await daemonInstall(url);
-      console.log(`      Registered as login daemon: ${LAUNCHD_LABEL}`);
-      process.stdout.write("      Starting");
-      for (let i = 0; i < 15; i++) {
-        await Bun.sleep(1000);
-        ping = await fetch(`${protocol}://${host}:${port}/`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
-        if (ping) break;
-        process.stdout.write(".");
-      }
-      process.stdout.write("\n");
+    await daemonInstall(url);
+    console.log(`      Registered daemon: ${OXMGR_PROCESS_NAME}`);
+    process.stdout.write("      Starting");
+    for (let i = 0; i < 15; i++) {
+      await Bun.sleep(1000);
+      ping = await fetch(`${protocol}://${host}:${port}/`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+      if (ping) break;
+      process.stdout.write(".");
     }
-    if (!ping) {
-      Bun.spawn([rechBin, "serve"], { stdout: "ignore", stderr: "ignore", detached: true });
-      process.stdout.write("      Starting");
-      for (let i = 0; i < 10; i++) {
-        await Bun.sleep(1000);
-        ping = await fetch(`${protocol}://${host}:${port}/`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
-        if (ping) break;
-        process.stdout.write(".");
-      }
-      process.stdout.write("\n");
-    }
+    process.stdout.write("\n");
     if (!ping) {
       console.error(`      Failed to start serve at ${host}:${port}`);
       rl.close();
@@ -679,8 +653,10 @@ async function status(): Promise<void> {
   const listenLine = lsofOut.split("\n").find(l => l.includes(`:${port}`));
   const listenAddr = listenLine?.match(/TCP\s+(\S+:\d+)/)?.[1] ?? (ping ? `${host}:${port}` : null);
   console.log(`serve:    ${ping ? `running  ${protocol}://${listenAddr ?? `${host}:${port}`}` : "not running"}`);
-  const launchdRunning = process.platform === "darwin" && existsSync(LAUNCHD_PLIST);
-  console.log(`daemon:   ${launchdRunning ? `launchd (${LAUNCHD_LABEL})` : "not installed"}`);
+  const oxmgrProc = Bun.spawn(["bunx", "oxmgr", "list"], { stdout: "pipe", stderr: "ignore" });
+  const oxmgrOut = await new Response(oxmgrProc.stdout).text();
+  const daemonRegistered = oxmgrOut.includes(OXMGR_PROCESS_NAME);
+  console.log(`daemon:   ${daemonRegistered ? `oxmgr (${OXMGR_PROCESS_NAME})` : "not installed"}`);
   const registry = await readTokenRegistry();
   const entries = Object.entries(registry);
   if (entries.length) {
