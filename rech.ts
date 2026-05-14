@@ -31,40 +31,41 @@ async function saveTokenEntry(profileEmail: string, entry: TokenEntry): Promise<
 const envFile = join(import.meta.dir, ".env.local");
 const globalEnvFile = join(process.env.HOME || "~", ".env.local");
 
-async function loadEnvFile(path: string): Promise<boolean> {
-  const envRaw = await file(path).text().catch(() => "");
-  if (!envRaw) return false;
-  let hasKey = false;
-  for (const line of envRaw.split("\n")) {
-    const m = line.match(/^\s*([^#=]+?)\s*=\s*(.*?)\s*$/);
-    if (m) {
+// Walk CWD→root loading env files nearest-first; per-key: closest file wins, farther files skip.
+// At each level .rechrome/.env.local is checked before .env.local (rechrome-specific overrides general).
+export async function loadNearestEnv(extraFallbacks: string[] = []) {
+  const seen = new Set<string>();
+  const applyFile = async (path: string) => {
+    const raw = await file(path).text().catch(() => "");
+    for (const line of raw.split("\n")) {
+      const m = line.match(/^\s*([^#=\s][^#=]*?)\s*=\s*(.*?)\s*$/);
+      if (!m || m[1].startsWith("#")) continue;
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
       process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
-      if (m[1] === ENV_KEY) hasKey = true;
     }
-  }
-  return hasKey;
-}
+  };
 
-async function loadEnv() {
-  // Collect dirs from CWD up to root, load root→CWD so CWD wins.
-  // At each level: .env.local first, then .rechrome/.env.local on top (rechrome-specific).
-  const dirs: string[] = [];
   let dir = process.cwd();
+  const dirs: string[] = [];
   while (true) {
     dirs.push(dir);
     const parent = join(dir, "..");
     if (parent === dir) break;
     dir = parent;
   }
-  for (const d of dirs.reverse()) {
-    await loadEnvFile(join(d, ".env.local"));
-    await loadEnvFile(join(d, ".rechrome", ".env.local"));
+  for (const d of dirs) {
+    await applyFile(join(d, ".rechrome", ".env.local"));
+    await applyFile(join(d, ".env.local"));
   }
-  // Fall back to script dir's config if still no RECHROME_URL
-  if (!process.env[ENV_KEY]) {
-    await loadEnvFile(envFile);
-    await loadEnvFile(join(import.meta.dir, ".rechrome", ".env.local"));
-  }
+  for (const f of extraFallbacks) await applyFile(f);
+}
+
+async function loadEnv() {
+  await loadNearestEnv([
+    join(import.meta.dir, ".rechrome", ".env.local"),
+    envFile,
+  ]);
 }
 // Shell-set passthrough vars survive .env.local loading
 const _shellPassthrough: Record<string, string> = {};
