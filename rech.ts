@@ -639,16 +639,7 @@ async function setup(opts: { profile?: string } = {}): Promise<void> {
   const { extId, token } = primary;
   const profileEmail = profileInfoSel.user_name || profileDir;
 
-  // Save RECHROME_URL
-  const pwdEnvPath = join(process.cwd(), ".env.local");
-  const pwdRechPath = join(process.cwd(), ".rechrome", ".env.local");
-  const homeEnvPath = join(process.env.HOME!, ".env.local");
-  const saveChoice = (await ask(
-    `\n[4/4] Save RECHROME_URL to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${pwdRechPath} (current dir, rechrome-only)\n  3. ${homeEnvPath} (user home)\n\n  Choice [1]: `
-  )).trim();
-  const globalEnvPath = saveChoice === "3" ? homeEnvPath : saveChoice === "2" ? pwdRechPath : pwdEnvPath;
-  if (saveChoice === "2") mkdirSync(join(process.cwd(), ".rechrome"), { recursive: true });
-  const existing = await file(globalEnvPath).text().catch(() => "");
+  // Build RECHROME_URL and show it before asking where to save
   const rechUrl = new URL(url);
   if (!rechUrl.username) rechUrl.username = randomBytes(9).toString("base64url");
   rechUrl.searchParams.set("extension_id", extId);
@@ -656,14 +647,26 @@ async function setup(opts: { profile?: string } = {}): Promise<void> {
   rechUrl.searchParams.set("profile", profileEmail);
   if (userDataDir) rechUrl.searchParams.set("user_data_dir", userDataDir);
   const newLine = `RECHROME_URL=${rechUrl.toString()}`;
-  const keysToRemove = ["PLAYWRIGHT_MCP_USER_DATA_DIR", "PLAYWRIGHT_MCP_EXTENSION_ID", "PLAYWRIGHT_MCP_EXTENSION_TOKEN", "PLAYWRIGHT_MCP_PROFILE_DIRECTORY"];
-  let lines = existing.trimEnd().split("\n").filter(l => !keysToRemove.some(k => l.startsWith(`${k}=`)));
-  const rechIdx = lines.findIndex(l => l.startsWith("RECHROME_URL="));
-  if (rechIdx >= 0) lines[rechIdx] = newLine;
-  else lines.push(newLine);
-  await Bun.write(globalEnvPath, lines.join("\n").trim() + "\n");
-  console.log(`\nSaved to ${globalEnvPath}`);
-  console.log(`\n  ${newLine}`);
+  console.log(`\n[4/4] Your RECHROME_URL:\n\n  ${newLine}\n`);
+
+  const pwdEnvPath = join(process.cwd(), ".env.local");
+  const pwdRechPath = join(process.cwd(), ".rechrome", ".env.local");
+  const homeEnvPath = join(process.env.HOME!, ".env.local");
+  const saveChoice = (await ask(
+    `Save to:\n  1. ${pwdEnvPath} (current dir) [default]\n  2. ${pwdRechPath} (current dir, rechrome-only)\n  3. ${homeEnvPath} (user home)\n  4. Skip (already copied)\n\n  Choice [1]: `
+  )).trim();
+  if (saveChoice !== "4") {
+    const globalEnvPath = saveChoice === "3" ? homeEnvPath : saveChoice === "2" ? pwdRechPath : pwdEnvPath;
+    if (saveChoice === "2") mkdirSync(join(process.cwd(), ".rechrome"), { recursive: true });
+    const existing = await file(globalEnvPath).text().catch(() => "");
+    const keysToRemove = ["PLAYWRIGHT_MCP_USER_DATA_DIR", "PLAYWRIGHT_MCP_EXTENSION_ID", "PLAYWRIGHT_MCP_EXTENSION_TOKEN", "PLAYWRIGHT_MCP_PROFILE_DIRECTORY"];
+    let lines = existing.trimEnd().split("\n").filter(l => !keysToRemove.some(k => l.startsWith(`${k}=`)));
+    const rechIdx = lines.findIndex(l => l.startsWith("RECHROME_URL="));
+    if (rechIdx >= 0) lines[rechIdx] = newLine;
+    else lines.push(newLine);
+    await Bun.write(globalEnvPath, lines.join("\n").trim() + "\n");
+    console.log(`\nSaved to ${globalEnvPath}`);
+  }
 
   // Save primary to token registry
   await saveTokenEntry(profileEmail, { extensionId: extId, token, profileDir, userDataDir: userDataDir ?? undefined });
