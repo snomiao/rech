@@ -11,8 +11,8 @@ export const DEFAULT_PORT = 13775;
 export const RECH_DIR = join(import.meta.dir, ".rech");
 export const LOG_DIR = join(RECH_DIR, "logs");
 
-const RECH_HOME_DIR = join(process.env.HOME!, ".rech");
-const TOKENS_FILE = join(RECH_HOME_DIR, "tokens.json");
+const RECH_HOME_DIR = join(process.env.HOME!, ".rechrome");
+const TOKENS_FILE = join(RECH_HOME_DIR, "profiles.json");
 
 type TokenEntry = { extensionId: string; token: string; profileDir: string; userDataDir?: string };
 
