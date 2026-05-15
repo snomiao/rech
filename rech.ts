@@ -338,14 +338,38 @@ async function callServe(
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({ args, identity, env }),
     signal: AbortSignal.timeout(70_000),
-  }).catch((e) => { console.error(`[rech] ${e.message}`); process.exit(1); });
-  if (res.status === 401) { console.error("Unauthorized: bad key"); process.exit(1); }
+  }).catch(async (e) => {
+    console.error(`[rech] ${e.message}`);
+    const dnsResult = await import("dns/promises").then(m => m.lookup(host)).catch(() => null);
+    if (!dnsResult) {
+      console.error(`[rech] rech-client\n  -x: DNS failed -> ${host}[unknown] -> rech-server[unknown]`);
+    } else {
+      const tcpOk = await new Promise<boolean>(resolve => {
+        import("net").then(({ createConnection }) => {
+          const s = createConnection({ host, port: Number(port), timeout: 3000 });
+          s.on("connect", () => { s.destroy(); resolve(true); });
+          s.on("error", () => resolve(false));
+          s.on("timeout", () => { s.destroy(); resolve(false); });
+        });
+      });
+      if (tcpOk) {
+        console.error(`[rech] rech-client -> ${host}:${port}\n  -x: connection refused -> rech-server[unknown]`);
+      } else {
+        console.error(`[rech] rech-client -> ${host}(${dnsResult.address})\n  -x: port ${port} unreachable -> rech-server[unknown]`);
+      }
+    }
+    process.exit(1);
+  });
+  if (res.status === 401) {
+    console.error(`[rech] rech-client -> rech-server[ok]\n  -x: token rejected -> playwright[unknown]`);
+    process.exit(1);
+  }
   return res.json();
 }
 
 async function run(url: string, args: string[]) {
-  const { host, port, protocol } = parseUrl(url);
-  const effectiveProfile = parseUrl(url).profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
+  const { host, port, protocol, extensionId, extensionToken, profileDirectory, userDataDir } = parseUrl(url);
+  const effectiveProfile = profileDirectory || process.env.PLAYWRIGHT_MCP_PROFILE_DIRECTORY;
   const displayProfile = effectiveProfile ? await resolveProfileEmail(effectiveProfile) : undefined;
   const identity = await getClientIdentity();
   const profileSuffix = displayProfile ? ` profile:${displayProfile}` : "";
@@ -353,11 +377,21 @@ async function run(url: string, args: string[]) {
     `[rech] connecting to ${host}:${port} (identity: ${identity.gitUrl || `${identity.hostname}:${identity.cwd}`}${profileSuffix})`,
   );
 
+  const resolvedEnv = await getClientEnv({ extensionId, extensionToken, profileDirectory, userDataDir });
   const { status, stdout, stderr, files, existingSession } = await callServe(url, args);
 
   if (existingSession)
     console.error(`[rech] session already has open tabs — listing existing tabs instead of opening a new window`);
-  if (stderr) process.stderr.write(stderr);
+  if (stderr) {
+    if (stderr.includes('Extension connection timeout')) {
+      const hasToken = !!resolvedEnv["PLAYWRIGHT_MCP_EXTENSION_TOKEN"];
+      const last = hasToken
+        ? `  -x: extension token rejected -> extension[unknown]`
+        : `  -> extension[not installed]  (run: rech setup)`;
+      console.error(`[rech] rech-client -> rech-server[ok] -> playwright[ok]\n${last}`);
+    }
+    process.stderr.write(stderr);
+  }
   if (stdout) process.stdout.write(stdout);
 
   if (files?.length) {
